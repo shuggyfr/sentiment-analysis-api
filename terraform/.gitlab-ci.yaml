@@ -1,0 +1,71 @@
+
+stages:
+  - lint
+  - test
+  - build
+  - deploy
+
+variables: # re usable values for pipeline jobs (for building, tagging, and pushing Docker images)
+  AWS_REGION: "us-east-1"
+  ECR_REGISTRY: 557150842415.dkr.ecr.us-east-1.amazonaws.com # container registry
+  IMAGE_NAME: sentiment-api
+
+lint: # automatically checking code for problems(quality, formatting)
+  stage: lint
+  image: python:3.11
+  script:
+    - pip install flake8 black
+    - flake8 app.py #     checks code quality and errors
+    - black --check app.py # checks and formats code style and layout consistently
+  only: # this job runs only on a merge request
+    - merge_requests
+
+test: # runnig code functionality tests
+  stage: test
+  image: python:3.11
+  script:
+    - pip install -r requirements.txt pytest
+    - pytest tests/
+  only: 
+    - merge_requests
+
+build_and_push:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:dind
+  script:
+    # Login to ECR
+    - aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin $ECR_REGISTRY
+
+    # Build image
+    - docker build -t $ECR_REGISTRY/$IMAGE_NAME/$CI_COMMIT_SHA .
+
+    #Push to ECR
+    - docker push $ECR_REGISTRY/$IMAGE_NAME:$CI_COMMIT_SHA
+    - docker tag $ECR_REGISTRY/$IMAGE_NAME:$CI_COMMIT_SHA 
+
+$ECR_REGISTRY/$IMAGE_NAME:latest
+    - docker push $ECR_REGISTRY/$IMAGE_NAME:latest
+  only:
+    - main
+
+deploy_to_k8s:
+  stage:deploy
+  image:amazon/aws-cli
+  script:
+     # Update kubeconfig to connnect to EKS  (kubeconfig- authentication and connection for kubernetes clusters)
+     - aws eks update-kubeconfig --region $AWS_REGION --name sentiment-api-cluster
+
+     # Update deployment image - talking to clusters (kubectl command line tool for controlling kubernetes clusters)
+     - kubectl set image deployment/sentiment-api sentimentapi=$ECR_REGISTRY/$IMAGE_NAME:$CI_COMMIT_SHA -n default
+
+     #wait for rollout
+     - kubectl rollout status deployment/sentiment-api -n default
+
+  only:
+    - main
+  environment:
+     name: production
+
+
